@@ -7,52 +7,97 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
+# LangChain modules
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 
+# ----------------------------------------------------
+# ENV + MODELS
+# ----------------------------------------------------
 load_dotenv()
 
-#Load routing model
 clf = joblib.load("models/department_classifier.pkl")
 vectorizer = joblib.load("models/vectorizer.pkl")
 
-#Embeddings
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-#LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
-    temperature=0.5,
-    max_output_tokens=200,
+    temperature=0.2,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 chat_history = []
 
 
-#vectorDB retriever for a department
-def get_department_retriever(department):
-    dep = department.lower()
-    folder = os.path.join(os.path.dirname(__file__), "chroma_db", dep)
+# ----------------------------------------------------
+# Extract ONLY the solution text
+# ----------------------------------------------------
+def extract_solution(text: str):
+    text = text.replace("\n", " ")
+
+    if "SOLUTION:" in text:
+        return text.split("SOLUTION:", 1)[1].strip()
+
+    return ""
+
+
+# ----------------------------------------------------
+# Normalize department name
+# ----------------------------------------------------
+def normalize_department(dept: str):
+    dept = dept.lower().strip()
+
+    mapping = {
+        "deliver": "delivery",
+        "delivery issue": "delivery",
+        "shipping": "delivery",
+
+        "account": "accounts",
+        "acc": "accounts",
+
+        "tech": "technical",
+        "app": "technical",
+        "crash": "technical",
+    }
+
+    return mapping.get(dept, dept)
+
+
+
+
+# ----------------------------------------------------
+# Load department retriever
+# ----------------------------------------------------
+def get_department_retriever(department: str):
+
+    base_dir = os.getcwd()
+    folder = os.path.join(base_dir, "chroma_db", department)
 
     if not os.path.exists(folder):
-        raise Exception(f"Vector DB missing for department '{department}' at: {folder}")
+        raise Exception(f"❌ Vector DB folder not found: {folder}")
 
-    return Chroma(
+    vectordb = Chroma(
         persist_directory=folder,
         embedding_function=embeddings
-    ).as_retriever(search_kwargs={"k": 5})
+    )
+
+    return vectordb.as_retriever(search_kwargs={"k": 5})
 
 
+# ----------------------------------------------------
 # Predict department
-def predict_department(text):
+# ----------------------------------------------------
+def predict_department(text: str):
     x = vectorizer.transform([text])
     return clf.predict(x)[0]
 
 
-# Save routing log
+# ----------------------------------------------------
+# Log routing
+# ----------------------------------------------------
 def save_routing_to_json(query, dept):
     os.makedirs("logs", exist_ok=True)
     file = "logs/routing_log.json"
@@ -71,36 +116,67 @@ def save_routing_to_json(query, dept):
     json.dump(logs, open(file, "w"), indent=4)
 
 
-# RAG Chain
+
+
+
+# ----------------------------------------------------
+# Prompt template
+# ----------------------------------------------------
 prompt = ChatPromptTemplate.from_messages([
     ("system",
-     """You are an expert customer service assistant.
-      Use the provided Context and Chat History to generate a comprehensive and accurate answer to the user's Question.
-      You MUST base your answer *only* on the provided Context. If the answer is genuinely not found in the Context,
-      respond clearly with 'The information is not available in our knowledge base."""),
-    ("system", "Chat history:\n{history}"),
-    ("system", "Context:\n{context}"),
+     """You are a strict RAG customer-support bot.
+
+RULES:
+1. Use ONLY the provided SOLUTIONS in context.
+2. If you don’t find the answer → reply EXACTLY: Not found.
+3. NO extra explanation. NO guessing.
+4. Answer short and clear."""
+     ),
+    ("system", "Chat History:\n{history}"),
+    ("system", "CONTEXT:\n{context}"),
     ("human", "{question}")
 ])
 
-def rag_chain(question, history, dept):
-    retriever = get_department_retriever(dept)
-    docs = retriever.invoke(question)
 
-    formatted_context = "\n\n".join([d.page_content for d in docs])
+# ----------------------------------------------------
+# RAG Chain
+# ----------------------------------------------------
+def rag_chain(question: str, history: str, department: str):
 
-    chain = prompt | llm 
-    
-    chain_input = {
+    retriever = get_department_retriever(department)
+    documents = retriever.invoke(question)
+
+    if not documents:
+        return "Not found."
+
+    solutions = []
+    for doc in documents:
+        sol = extract_solution(doc.page_content)
+        if sol:
+            solutions.append(sol)
+
+    if not solutions:
+        return "Not found."
+
+    context_text = "\n".join(solutions)
+
+    chain = prompt | llm
+
+    response = chain.invoke({
         "question": question,
-        "context": formatted_context,
+        "context": context_text,
         "history": history
-    }
+    })
 
-    return chain, chain_input
+    if not response or not response.content.strip():
+        return "Not found."
+
+    return response.content.strip()
 
 
+# ----------------------------------------------------
 # FASTAPI
+# ----------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
@@ -121,30 +197,37 @@ class ChatResponse(BaseModel):
     department: str
 
 
+# ----------------------------------------------------
+# MAIN CHAT ENDPOINT
+# ----------------------------------------------------
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    query = request.message
 
-    dept = predict_department(query)
-    save_routing_to_json(query, dept)
+    query = request.message.strip().lower()
 
-    history = "\n".join(chat_history)
-    
-    # Get the chain and the input dictionary
-    chain, chain_input = rag_chain(query, history, dept) 
-    
-    # Execute the chain using
-    result = chain.invoke(chain_input)
+    # Clear chat history
+    if query in ["clear history", "reset", "clear"]:
+        chat_history.clear()
+        return ChatResponse(reply="History Cleared.", department="none")
 
-    # The result will be a ChatMessage object
-    reply = result.content 
+    # Predict and normalize department
+    predicted = predict_department(query)
+    department = normalize_department(predicted)
 
-    chat_history.append(f"User: {query}")
-    chat_history.append(f"Bot: {reply}")
+    save_routing_to_json(query, department)
 
-    return ChatResponse(reply=reply, department=dept)
+    # Use only last 3 queries
+    limited_history = chat_history[-3:]
+    history_text = "\n".join(limited_history)
+
+    reply = rag_chain(query, history_text, department)
+
+    chat_history.append(query)
+
+    return ChatResponse(reply=reply, department=department)
+
 
 
 @app.get("/")
 def home():
-    return {"message": "Backend running!"}
+    return {"message": "Backend is running!"}
