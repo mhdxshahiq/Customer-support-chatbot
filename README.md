@@ -1,34 +1,80 @@
-# 🤖 Customer Support RAG Chatbot
+# 🧠 Mental Health RAG Chatbot (Gemini + LangChain + Chroma)
 
-This project is a **Retrieval-Augmented Generation (RAG)** chatbot designed to answer user questions using internal support ticket data. It is built using the modular **LangChain** framework and powered by the **Gemini** LLM.
+A lightweight mental-health conversational AI assistant built using:
 
----
+- **Google Gemini 2.0 Flash**
+- **LangChain**
+- **ChromaDB**
+- **Retrieval-Augmented Generation (RAG)**
+- **Conversation Memory (last 4 turns = 8 messages)**
+- **Safety filters (anti-jailbreak + topic restriction)**
 
-## ✨ Key Components
-
-| Component | Purpose | Package |
-| :--- | :--- | :--- |
-| **LLM** | Generates answers and maintains conversation flow. | `ChatGoogleGenerativeAI` |
-| **Embeddings** | Converts ticket text into numerical vectors. | `HuggingFaceEmbeddings` (`all-MiniLM-L6-v2`) |
-| **Vector Store** | Stores and retrieves relevant ticket data quickly. | `ChromaDB` (Persisted to `./chroma_db_hf`) |
-| **Chain** | Orchestrates the retrieval of context and the generation of the final answer. | Custom LCEL Chain |
+This chatbot ONLY talks about emotional well-being and blocks unsafe or unrelated topics.
 
 ---
 
-## ⚙️ Setup and Installation
+## ✨ Features
 
-### Prerequisites
+### 🔹 1. Retrieval-Augmented Generation (RAG)
+The bot retrieves the most relevant answers from your mental-health dataset stored in **ChromaDB**.
 
-* Python 3.9+
-* A **Google API Key** for the Gemini model.
+### 🔹 2. Conversation Memory  
+Remembers the **last 4 conversation turns** (8 messages total).  
+Makes replies more natural and contextual.
 
-### 1. Installation
+### 🔹 3. Safety Guardrails  
+Prevents harmful prompts like:
 
-Create your Python virtual environment and install dependencies using your `requirements.txt` file:
+- *ignore previous*
+- *jailbreak*
+- *switch role*
+- *system override*
 
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-.venv\Scripts\activate      # Windows
+And refuses off-topic questions politely.
 
-pip install -r requirements.txt
+### 🔹 4. Text Summarization  
+RAG chunks are summarized before generating the final response.
+
+---
+
+## 📁 Project Structure
+
+│── main.py → Chatbot logic + safety + memory + RAG
+│── rag_pipeline.py → ChromaDB retriever
+│── ingest.py → CSV → chunks → embeddings → Chroma
+│── system_prompt.py → Base system instruction
+│── data.csv → Your mental-health FAQ dataset
+│── README.md
+
+
+🧠 How It Works (Workflow)
+1. User enters a question
+
+↓
+
+2. Bot checks: Is topic related to mental health?
+
+↓
+
+3. Retrieves relevant chunks from ChromaDB
+
+↓
+
+4. Summarizes chunks using Gemini
+
+↓
+
+5. Builds final prompt with:
+
+summary
+
+memory
+
+user query
+↓
+
+6. Gemini generates a safe response
+
+↓
+
+7. Memory updated (max 4 turns)
